@@ -1496,3 +1496,59 @@ fn test_clawback_token_conservation() {
     assert_eq!(token_client.balance(&recipient), 500);
     assert_eq!(token_client.balance(&compliance_admin), 100);
 }
+
+#[test]
+fn test_get_claimable_batch_empty() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, StellarStreamContract);
+    let client = StellarStreamContractClient::new(&env, &contract_id);
+    let stream_ids = Vec::new(&env);
+    let result = client.get_claimable_batch(&stream_ids, &1000);
+    assert_eq!(result.len(), 0);
+}
+
+#[test]
+fn test_get_claimable_batch_single_and_multi() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, StellarStreamContract);
+    let client = StellarStreamContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token = create_token(&env, &admin);
+    let token_admin = token::StellarAssetClient::new(&env, &token);
+    token_admin.mint(&sender, &2000);
+
+    let id1 = client.create_stream(&sender, &recipient, &token, &1000, &0, &1000, &None);
+    let id2 = client.create_stream(&sender, &recipient, &token, &1000, &500, &1500, &None);
+
+    let mut ids = Vec::new(&env);
+    ids.push_back(id1);
+    ids.push_back(id2);
+    ids.push_back(999); // Unknown ID
+
+    let result = client.get_claimable_batch(&ids, &500);
+    assert_eq!(result.get(id1).unwrap(), 500);
+    assert_eq!(result.get(id2).unwrap(), 0);
+    assert_eq!(result.get(999).unwrap(), 0);
+
+    let result_late = client.get_claimable_batch(&ids, &1000);
+    assert_eq!(result_late.get(id1).unwrap(), 1000);
+    assert_eq!(result_late.get(id2).unwrap(), 500);
+    assert_eq!(result_late.get(999).unwrap(), 0);
+}
+
+#[test]
+#[should_panic(expected = "too many stream ids")]
+fn test_get_claimable_batch_limit_exceeded() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, StellarStreamContract);
+    let client = StellarStreamContractClient::new(&env, &contract_id);
+    let mut ids = Vec::new(&env);
+    for i in 0..21 {
+        ids.push_back(i as u64);
+    }
+    client.get_claimable_batch(&ids, &1000);
+}
+

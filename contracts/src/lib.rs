@@ -30,6 +30,7 @@ pub struct Stream {
 
 #[contracttype]
 enum DataKey {
+    Admin,
     NextStreamId,
     Stream(u64),
     SplitChildren(u64),
@@ -307,6 +308,30 @@ impl StellarStreamContract {
         let vested = vested_amount(&stream, at_time);
         let claimable = vested - stream.claimed_amount;
         if claimable < 0 { 0 } else { claimable }
+    }
+
+    pub fn get_claimable_batch(env: Env, stream_ids: Vec<u64>, at_time: u64) -> Map<u64, i128> {
+        if stream_ids.len() > 20 {
+            panic!("too many stream ids");
+        }
+        let mut result = Map::new(&env);
+        for stream_id in stream_ids.iter() {
+            let stream_opt: Option<Stream> = env.storage().persistent().get(&DataKey::Stream(stream_id));
+            let amount = match stream_opt {
+                Some(stream) => {
+                    let vested = vested_amount(&stream, at_time);
+                    let claimable = vested - stream.claimed_amount;
+                    if claimable < 0 {
+                        0
+                    } else {
+                        claimable
+                    }
+                }
+                None => 0,
+            };
+            result.set(stream_id, amount);
+        }
+        result
     }
 
     // -----------------------------------------------------------------------
