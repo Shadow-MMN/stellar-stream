@@ -101,7 +101,7 @@ const INITIAL_VALUES: FormValues = {
   recipient: "",
   assetCode: "USDC",
   totalAmount: "150",
-  durationHours: "24",
+  durationMinutes: "1440",
   startInMinutes: "0",
 };
 
@@ -154,7 +154,7 @@ export function CreateStreamForm({
         recipient: values.recipient.trim(),
         assetCode: values.assetCode.trim().toUpperCase(),
         totalAmount: Number(values.totalAmount),
-        durationSeconds: Math.floor(Number(values.durationHours) * 3600),
+        durationSeconds: Math.floor(Number(values.durationMinutes) * 60),
         startAt,
       });
 
@@ -202,7 +202,7 @@ export function CreateStreamForm({
   })();
 
   return (
-    <form onSubmit={handleSubmit}>
+    <form onSubmit={handleSubmit} noValidate>
       {parsedApiError && (
         <div className="api-error-box">
           <div className="api-error-box__title">{parsedApiError.title}</div>
@@ -409,8 +409,76 @@ export function CreateStreamForm({
         {errors.startInMinutes && (
           <span id="start-error" className="field-error" role="alert">
             {errors.startInMinutes}
+      {/* Duration & Start In Minutes */}
+      <div className="row">
+        <div
+          className={`field-group${errors.durationMinutes ? " field-group--error" : ""}`}
+        >
+          <label htmlFor="stream-duration">
+            Duration (minutes)
+            <span className="field-required" aria-hidden>
+              *
+            </span>
+          </label>
+          <input
+            id="stream-duration"
+            type="number"
+            min="1"
+            step="1"
+            value={values.durationMinutes}
+            onChange={set("durationMinutes")}
+            onBlur={blur("durationMinutes")}
+            onKeyDown={(e) => {
+              if (["e", "E", "+", "-", "."].includes(e.key)) e.preventDefault();
+            }}
+            aria-describedby={
+              errors.durationMinutes ? "duration-error" : undefined
+            }
+            aria-invalid={!!errors.durationMinutes}
+            required
+          />
+          {errors.durationMinutes && (
+            <span id="duration-error" className="field-error" role="alert">
+              {errors.durationMinutes}
+            </span>
+          )}
+        </div>
+
+        <div
+          className={`field-group${errors.startInMinutes ? " field-group--error" : ""}`}
+        >
+          <label htmlFor="stream-start">
+            Start In (minutes)
+            <span className="field-required" aria-hidden>
+              *
+            </span>
+          </label>
+          <input
+            id="stream-start"
+            type="number"
+            min="0"
+            step="1"
+            value={values.startInMinutes}
+            onChange={set("startInMinutes")}
+            onBlur={blur("startInMinutes")}
+            onKeyDown={(e) => {
+              if (["e", "E", "+", "-", "."].includes(e.key)) e.preventDefault();
+            }}
+            aria-describedby={
+              errors.startInMinutes ? "start-error" : "start-hint"
+            }
+            aria-invalid={!!errors.startInMinutes}
+            required
+          />
+          <span id="start-hint" className="field-hint">
+            Enter 0 to start immediately
           </span>
-        )}
+          {errors.startInMinutes && (
+            <span id="start-error" className="field-error" role="alert">
+              {errors.startInMinutes}
+            </span>
+          )}
+        </div>
       </div>
 
       <div style={{ display: "flex", gap: "1rem", alignItems: "center", marginTop: "1rem" }}>
