@@ -33,7 +33,7 @@ if (!jwtSecret) {
   );
 }
 
-function getJwtSecret() {
+export function getJwtSecret() {
   return jwtSecret as string;
 }
 
