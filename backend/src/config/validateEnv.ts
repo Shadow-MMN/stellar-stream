@@ -61,7 +61,7 @@ export interface ValidatedConfig {
   dbPath: string;
   webhookDestinationUrl: string | null;
   webhookSigningSecret: string | null;
-  jwtSecret: string;
+  jwtSecret: string | undefined;
   serverSigningKey: string | null;
   domain: string;
 }

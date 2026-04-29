@@ -2,8 +2,10 @@ import React from 'react';
 import { render, screen, cleanup } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { StreamsTable } from '../components/StreamsTable'; 
-import { Stream } from '../types/stream'; 
+import { StreamsTable } from '../components/StreamsTable';
+import { Stream } from '../types/stream';
+
+const noop = () => {};
 
 const mockStreams: Stream[] = [
   {
