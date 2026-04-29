@@ -22,6 +22,9 @@ import { RecipientDashboard } from "./RecipientDashboard";
 // Mock soroban service so tests don't hit the network
 // ---------------------------------------------------------------------------
 
+vi.mock("../services/soroban", () => ({
+  claimStream: vi.fn(),
+}));
 vi.mock("../services/soroban", () => {
   const mockFn = vi.fn();
   return {
@@ -82,12 +85,14 @@ function setupRecipientHandler(streams: unknown[]) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockClaimStream.mockResolvedValue({
   mockClaimOnChain.mockResolvedValue({
     result: {
       claimedAmount: 500,
       assetCode: "USDC",
       txHash: "txhash123",
     },
+    history: [],
     history: []
   });
 });
@@ -116,6 +121,9 @@ describe("RecipientDashboard", () => {
     setupRecipientHandler([activeStream]);
     render(<RecipientDashboard recipientAddress={RECIPIENT} />);
 
+    await waitFor(() =>
+      expect(screen.getByLabelText(/claim.*from stream 1/i)).toBeInTheDocument(),
+    );
     await waitFor(() => {
       const claimButton = screen.getByLabelText(/claim 500 USDC from stream 1/i);
       expect(claimButton).toBeInTheDocument();
@@ -240,6 +248,23 @@ describe("RecipientDashboard", () => {
     expect(screen.getByLabelText(/claim 500 USDC from stream 1/i)).toBeInTheDocument();
   });
 
+  it("shows pending banner while claim is in-flight", async () => {
+    mockClaimStream.mockReturnValue(new Promise(() => {}));
+    setupRecipientHandler([activeStream]);
+    render(<RecipientDashboard recipientAddress={RECIPIENT} />);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(/claim.*from stream 1/i)).toBeInTheDocument(),
+    );
+
+    act(() => {
+      fireEvent.click(screen.getByLabelText(/claim.*from stream 1/i));
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText(/waiting for on-chain confirmation/i)).toBeInTheDocument(),
+    );
+  });
 
   it("toast can be dismissed", async () => {
     setupRecipientHandler([activeStream]);
