@@ -23,5 +23,6 @@ Snapshot files are located in `contracts/test_snapshots/`.
 **To update snapshots:**
 If you change event structures and need to update the snapshots, run:
 
+
 ```bash
 cargo insta review
