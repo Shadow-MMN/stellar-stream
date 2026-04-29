@@ -3,7 +3,7 @@ extern crate std;
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
-
+    token, Env, IntoVal, Map, String, Symbol, Vec, symbol_short,
 };
 use insta::assert_debug_snapshot as assert_snapshot;
 
@@ -153,6 +153,80 @@ fn test_claim_fails_with_wrong_recipient() {
     let stream_id = client.create_stream(&sender, &recipient, &token, &1000, &0, &1000, &0, &None);
     env.ledger().with_mut(|l| l.timestamp = 500);
     client.claim(&stream_id, &wrong_recipient, &500);
+}
+
+#[test]
+fn test_claim_after_stream_fully_completed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, StellarStreamContract);
+    let client = StellarStreamContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token = create_token(&env, &admin);
+    let token_admin = token::StellarAssetClient::new(&env, &token);
+    token_admin.mint(&sender, &1000);
+    
+    // Create stream from time 0 to 1000
+    let stream_id = client.create_stream(&sender, &recipient, &token, &1000, &0, &1000, &0, &None);
+    
+    // Move time past the end of the stream
+    env.ledger().with_mut(|l| l.timestamp = 1500);
+    
+    // Recipient should be able to claim the full total_amount
+    let claimed = client.claim(&stream_id, &recipient, &1000);
+    assert_eq!(claimed, 1000);
+    
+    // Verify the stream state
+    let stream = client.get_stream(&stream_id);
+    assert_eq!(stream.claimed_amount, 1000);
+    assert_eq!(stream.total_amount, 1000);
+    
+    // Verify claimable is now zero
+    let claimable = client.claimable(&stream_id, &1500);
+    assert_eq!(claimable, 0);
+}
+
+#[test]
+#[should_panic(expected = "amount exceeds claimable")]
+fn test_claim_on_canceled_stream() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, StellarStreamContract);
+    let client = StellarStreamContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token = create_token(&env, &admin);
+    let token_admin = token::StellarAssetClient::new(&env, &token);
+    token_admin.mint(&sender, &1000);
+    
+    // Create stream from time 0 to 1000
+    let stream_id = client.create_stream(&sender, &recipient, &token, &1000, &0, &1000, &0, &None);
+    
+    // Move to midpoint (500 vested)
+    env.ledger().with_mut(|l| l.timestamp = 500);
+    
+    // Cancel the stream at midpoint
+    client.cancel(&stream_id, &sender);
+    
+    // Verify stream is canceled and end_time is adjusted
+    let stream = client.get_stream(&stream_id);
+    assert!(stream.canceled);
+    assert_eq!(stream.end_time, 500);
+    assert_eq!(stream.total_amount, 500); // Only 500 vested at cancel time
+    
+    // Recipient can claim the vested amount (500)
+    let claimed = client.claim(&stream_id, &recipient, &500);
+    assert_eq!(claimed, 500);
+    
+    // Move time forward
+    env.ledger().with_mut(|l| l.timestamp = 800);
+    
+    // Attempting to claim more should panic because nothing more is claimable
+    // (stream was canceled at 500, so only 500 total was vested)
+    client.claim(&stream_id, &recipient, &100);
 }
 
 #[test]
@@ -689,6 +763,8 @@ fn test_vested_amount_fuzz_invariants() {
         canceled: false,
         paused: false,
         pause_started_at: None,
+        paused_at: 0,
+        paused_duration: 0,
         metadata: None,
     };
 
@@ -729,6 +805,7 @@ fn test_create_stream_fails_with_invalid_token_address() {
         &1000,
         &0,
         &1000,
+        &0,
         &None,
     );
 }
@@ -918,7 +995,7 @@ fn test_transfer_stream_updates_recipient() {
 }
 
 #[test]
-
+fn test_transfer_stream_claim_by_new_recipient() {
     let env = Env::default();
     env.mock_all_auths();
     let contract_id = env.register_contract(None, StellarStreamContract);
@@ -998,8 +1075,8 @@ fn test_metadata_multiple_labels_round_trip() {
     meta.set(String::from_str(&env, "project"), String::from_str(&env, "xlm-vesting"));
     meta.set(String::from_str(&env, "cost_center"), String::from_str(&env, "cc-42"));
 
-    let stream_id = client.create_stream(&sender, &recipient, &token, &1000, &0, &1000, &0, &Some(meta.clone()),
-    );
+    let stream_id = client.create_stream(&sender, &recipient, &token, &1000, &0, &1000, &0, &Some(meta.clone()));
+
 
     let stream = client.get_stream(&stream_id);
     let stored = stream.metadata.unwrap();
@@ -1189,7 +1266,7 @@ fn test_clawback_before_initialize_panics() {
     token_mint.mint(&sender, &1000);
 
     let stream_id = client.create_stream(
-        &sender, &recipient, &token, &1000, 0, 1000, 0, &None,
+        &sender, &recipient, &token, &1000, &0, &1000, &0, &None,
     );
     env.ledger().with_mut(|l| l.timestamp = 500);
     client.clawback(&stream_id, &100, &someone);
@@ -1338,6 +1415,8 @@ fn test_resume_stream_panic_on_missing_timestamp() {
         canceled: false,
         paused: true,
         pause_started_at: None,
+        paused_at: 0,
+        paused_duration: 0,
         metadata: None,
     };
 
@@ -1585,9 +1664,9 @@ fn test_create_split_stream_success() {
     let token_admin = token::StellarAssetClient::new(&env, &token);
     token_admin.mint(&sender, &1000);
 
-    let recipients = Vec::new(&env);
+    let mut recipients = Vec::new(&env);
     recipients.push_back((r1.clone(), 400_i128));
-    recipients.push_back((r2.clone(), 600_i128));;
+    recipients.push_back((r2.clone(), 600_i128));
 
     // 400 + 600 = 1000 (matches total_amount)
     let parent_id = client.create_split_stream(&sender, &token, &1000, &1000, &2000, &recipients);
@@ -1624,9 +1703,9 @@ fn test_create_split_stream_undersum_panics() {
     let token_admin = token::StellarAssetClient::new(&env, &token);
     token_admin.mint(&sender, &1000);
 
-    let recipients = Vec::new(&env);
+    let mut recipients = Vec::new(&env);
     recipients.push_back((Address::generate(&env), 400_i128));
-    recipients.push_back((Address::generate(&env), 500_i128));;
+    recipients.push_back((Address::generate(&env), 500_i128));
 
     // 400 + 500 = 900 != 1000
     client.create_split_stream(&sender, &token, &1000, &1000, &2000, &recipients);
@@ -1646,9 +1725,9 @@ fn test_create_split_stream_oversum_panics() {
     let token_admin = token::StellarAssetClient::new(&env, &token);
     token_admin.mint(&sender, &1100);
 
-    let recipients = Vec::new(&env);
+    let mut recipients = Vec::new(&env);
     recipients.push_back((Address::generate(&env), 600_i128));
-    recipients.push_back((Address::generate(&env), 500_i128));;
+    recipients.push_back((Address::generate(&env), 500_i128));
 
     // 600 + 500 = 1100 != 1000
     client.create_split_stream(&sender, &token, &1000, &1000, &2000, &recipients);
@@ -2077,8 +2156,8 @@ fn test_get_claimable_batch_single_and_multi() {
     let token_admin = token::StellarAssetClient::new(&env, &token);
     token_admin.mint(&sender, &2000);
 
-    let id1 = client.create_stream(&sender, &recipient, &token, &1000, &0, &1000, &None);
-    let id2 = client.create_stream(&sender, &recipient, &token, &1000, &500, &1500, &None);
+    let id1 = client.create_stream(&sender, &recipient, &token, &1000, &0, &1000, &0, &None);
+    let id2 = client.create_stream(&sender, &recipient, &token, &1000, &500, &1500, &0, &None);
 
     let mut ids = Vec::new(&env);
     ids.push_back(id1);
