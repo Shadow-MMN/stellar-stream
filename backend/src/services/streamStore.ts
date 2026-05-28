@@ -85,7 +85,6 @@ function rowToRecord(row: StreamRow): StreamRecord {
     refundedAmount: row.refunded_amount ?? undefined,
     pausedAt: row.paused_at ?? undefined,
     pausedDuration: row.paused_duration ?? 0,
-    pausedDuration: row.paused_duration,
   };
 }
 
@@ -160,7 +159,7 @@ export async function initSoroban() {
   }
 }
 
-function nowInSeconds(): number {
+export function nowInSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
 
@@ -360,11 +359,8 @@ function computeStatus(stream: StreamRecord, at: number): StreamStatus {
   if (at < stream.startAt) {
     return "scheduled";
   }
-  if (at >= stream.startAt + stream.durationSeconds) {
+  if (at >= stream.startAt + stream.durationSeconds + stream.pausedDuration) {
     return "completed";
-  }
-  if (stream.pausedAt !== undefined) {
-    return "active"; // Or could be a "paused" status if we want to add it
   }
   return "active";
 }
@@ -380,28 +376,17 @@ export function calculateProgress(
   stream: StreamRecord,
   at = nowInSeconds(),
 ): StreamProgress {
-  const streamEnd = stream.startAt + stream.durationSeconds;
 
-  // Calculate paused duration including current pause if active
-  let pausedDuration = stream.pausedDuration;
-  if (stream.pausedAt !== undefined) {
-    pausedDuration += Math.max(0, at - stream.pausedAt);
   }
 
-  const effectiveEnd =
-    stream.canceledAt !== undefined
-      ? Math.min(stream.canceledAt, streamEnd)
-      : streamEnd;
+  const streamEnd = stream.startAt + stream.durationSeconds;
 
   // When paused, vesting is frozen at the moment of pause.
   const effectiveAt =
     stream.pausedAt !== undefined ? Math.min(at, stream.pausedAt) : at;
 
-  const elapsed = Math.max(0, Math.min(effectiveAt, effectiveEnd) - stream.startAt);
-      ?Math.min(stream.canceledAt, streamEnd + pausedDuration)
-      : streamEnd + pausedDuration;
 
-  const elapsed = Math.max(0, Math.min(at, effectiveEnd) - stream.startAt - pausedDuration);
+
   const ratio = Math.min(1, elapsed / stream.durationSeconds);
   const vestedAmount = stream.totalAmount * ratio;
 
@@ -415,13 +400,46 @@ export function calculateProgress(
   };
 }
 
-/**
- * Syncs all on-chain streams from Soroban contract to local SQLite database.
- * Fetches streams in parallel (max 5 concurrent RPC calls) with fallback to sequential.
- * Updates existing streams and inserts new ones.
- * @async
- * @returns {Promise<void>}
- */
+export async function getOnChainClaimableAmount(
+  id: string,
+): Promise<{ claimableAmount: number; at: number }> {
+  const sorobanContext = getSorobanContext();
+  if (!sorobanContext || !rpcServer) {
+    throw new Error("Soroban RPC server is not initialized.");
+  }
+
+  const sourceAccount = await sorobanContext.sourceAccountPromise;
+  const latestLedger = await rpcServer.getLatestLedger();
+  const at = latestLedger.closeTime ? parseInt(latestLedger.closeTime, 10) : Math.floor(Date.now() / 1000);
+
+  const simRes = await simulateContractCall(
+    sorobanContext.contract,
+    sourceAccount,
+    "claimable",
+    nativeToScVal(parseInt(id), { type: "u64" }),
+    nativeToScVal(at, { type: "u64" }),
+  );
+
+  if (!rpc.Api.isSimulationSuccess(simRes) || !simRes.result) {
+    throw new Error("Simulation failed: " + JSON.stringify(simRes));
+  }
+
+  const claimableAmount = Number(scValToNative(simRes.result.retval));
+  return { claimableAmount, at };
+}
+
+export async function getLatestLedgerTime(): Promise<number> {
+  if (!rpcServer) {
+    return Math.floor(Date.now() / 1000);
+  }
+  try {
+    const latestLedger = await rpcServer.getLatestLedger();
+    return latestLedger.closeTime ? parseInt(latestLedger.closeTime, 10) : Math.floor(Date.now() / 1000);
+  } catch (e) {
+    return Math.floor(Date.now() / 1000);
+  }
+}
+
 export async function syncStreams() {
   const sorobanContext = getSorobanContext();
   if (!sorobanContext) return;
@@ -682,12 +700,7 @@ export async function createStream(input: StreamInput): Promise<StreamRecord> {
   return stream;
 }
 
-/**
- * Refreshes stream statuses by marking completed streams.
- * Marks streams as completed when current time exceeds stream end time.
- * Records "completed" events and triggers webhooks for newly completed streams.
- * @returns {number} Number of streams marked as completed
- */
+
 export function refreshStreamStatuses(): number {
   const db = getDb();
   const now = nowInSeconds();
@@ -695,14 +708,14 @@ export function refreshStreamStatuses(): number {
 
   const toComplete = db.prepare(`
     SELECT * FROM streams 
-    WHERE canceled_at IS NULL AND completed_at IS NULL
+    WHERE canceled_at IS NULL AND completed_at IS NULL AND paused_at IS NULL
       AND (start_at + duration_seconds) <= ?
   `).all() as StreamRow[];
 
 
   const result = db.prepare(`
     UPDATE streams SET completed_at = ?
-    WHERE canceled_at IS NULL AND completed_at IS NULL
+    WHERE canceled_at IS NULL AND completed_at IS NULL AND paused_at IS NULL
       AND (start_at + duration_seconds) <= ?
   `).run(now, now);
 
@@ -933,79 +946,6 @@ export async function cancelStream(
   return stream;
 }
 
-/**
- * Pauses an active stream.
- * Only active streams can be paused. Records "paused" event and triggers webhook.
- * @param {string} id - Stream ID to pause
- * @returns {StreamRecord} The updated stream record
- * @throws {Error} If stream not found or not in active state
- */
-export function pauseStream(id: string): StreamRecord {
-  const stream = getStream(id);
-  if (!stream) {
-    const err: any = new Error("Stream not found.");
-    err.statusCode = 404;
-    throw err;
-  }
-
-  const status = computeStatus(stream, nowInSeconds());
-  if (status !== "active") {
-    const err: any = new Error("Only active streams can be paused.");
-    err.statusCode = 400;
-    throw err;
-  }
-
-  stream.pausedAt = nowInSeconds();
-  const db = getDb();
-  db.transaction(() => {
-    upsertStream(stream);
-    recordEventWithDb(db, stream.id, "paused", stream.pausedAt!, stream.sender);
-  })();
-
-  triggerWebhook("paused", stream);
-  return stream;
-}
-
-/**
- * Resumes a paused stream.
- * Extends the stream duration to compensate for pause time so recipient doesn't lose vesting.
- * Records "resumed" event and triggers webhook.
- * @param {string} id - Stream ID to resume
- * @returns {StreamRecord} The updated stream record
- * @throws {Error} If stream not found or not in paused state
- */
-export function resumeStream(id: string): StreamRecord {
-  const stream = getStream(id);
-  if (!stream) {
-    const err: any = new Error("Stream not found.");
-    err.statusCode = 404;
-    throw err;
-  }
-
-  if (stream.pausedAt === undefined) {
-    const err: any = new Error("Stream is not paused.");
-    err.statusCode = 400;
-    throw err;
-  }
-
-  const now = nowInSeconds();
-  const elapsed = now - stream.pausedAt;
-  stream.pausedDuration = (stream.pausedDuration ?? 0) + elapsed;
-  // Extend the effective duration so the recipient doesn't lose vesting time.
-  stream.durationSeconds += elapsed;
-  stream.pausedAt = undefined;
-
-  const db = getDb();
-  db.transaction(() => {
-    upsertStream(stream);
-    recordEventWithDb(db, stream.id, "resumed", now, stream.sender, undefined, {
-      pausedDuration: stream.pausedDuration,
-    });
-  })();
-
-  triggerWebhook("resumed", stream);
-  return stream;
-}
 
 /**
  * Updates the start time of a scheduled stream.
