@@ -32,3 +32,9 @@ Once a report is received through the GitHub Security Advisory form, we commit t
 ## GitHub Security Advisories
 
 Maintainers: Please ensure that **GitHub Security Advisories** are enabled for this repository to allow researchers to submit reports privately.
+
+## Static Security Analysis
+
+This repository runs CodeQL security analysis for the JavaScript and TypeScript codebase on every pull request and every push to `main`.
+
+CodeQL uploads results to the GitHub Security tab. Maintainers should review new alerts before merging security-sensitive changes, prioritize any high or critical findings, and keep the baseline scan free of high or critical alerts.
