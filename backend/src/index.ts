@@ -1425,7 +1425,7 @@ app.patch(
     }
 
     try {
-
+<
       const normalizedError = normalizeUnknownApiError(
         error,
         "Failed to update stream start time.",
