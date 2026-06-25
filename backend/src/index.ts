@@ -76,6 +76,7 @@ import {
 import { validateEnv } from "./config/validateEnv";
 import { getMetricsHistory } from "./services/metricsHistory";
 import { initCache } from "./services/cache";
+import { getGlobalStats } from "./services/stats";
 import { logger } from "./logger";
 
 const STREAM_STATUSES: StreamStatus[] = [
@@ -316,6 +317,17 @@ app.get("/api/health", (_req: Request, res: Response) => {
   });
 });
 
+app.get("/api/stats", (_req: Request, res: Response) => {
+  try {
+    const stats = getGlobalStats();
+    res.set("Cache-Control", "max-age=30");
+    res.json({ data: stats });
+  } catch (error) {
+    logger.error({ err: error }, "Failed to get stats");
+    sendApiError(_req, res, 500, "Failed to compute stats.", { code: "INTERNAL_ERROR" });
+  }
+});
+
 const METRICS_AUTH = process.env.METRICS_AUTH?.trim() || null; // format: "user:password"
 
 app.get("/api/metrics", async (_req: Request, res: Response) => {
@@ -378,7 +390,7 @@ app.get("/api/assets", (_req: Request, res: Response) => {
   });
 });
 
-app.get("/api/streams", readLimiter, (req: Request, res: Response) => {
+app.get("/api/streams", readLimiter, async (req: Request, res: Response) => {
   const parsedQuery = listStreamsQuerySchema.safeParse(req.query);
   if (!parsedQuery.success) {
     sendValidationError(req, res, parsedQuery.error.issues);
@@ -386,6 +398,20 @@ app.get("/api/streams", readLimiter, (req: Request, res: Response) => {
   }
 
   const query = parsedQuery.data;
+  const cacheKey = `streams:list:${JSON.stringify(query)}`;
+  
+  try {
+    const cache = getCache();
+    const cached = await cache.get<{ data: any[], total: number, page: number, limit: number }>(cacheKey);
+    if (cached) {
+      res.set("Cache-Control", "max-age=5");
+      res.json(cached);
+      return;
+    }
+  } catch {
+    // If cache fails, just proceed without caching
+  }
+
   const hasPage = req.query.page !== undefined;
   const hasLimit = req.query.limit !== undefined;
 
@@ -443,13 +469,23 @@ app.get("/api/streams", readLimiter, (req: Request, res: Response) => {
 
   const offset = (page - 1) * limit;
   const paginatedData = data.slice(offset, offset + limit);
-
-  res.json({
+  
+  const result = {
     data: paginatedData,
     total,
     page,
     limit,
-  });
+  };
+
+  try {
+    const cache = getCache();
+    await cache.set(cacheKey, result, 5);
+  } catch {
+    // If cache fails, just proceed
+  }
+
+  res.set("Cache-Control", "max-age=5");
+  res.json(result);
 });
 
 app.get("/api/events", readLimiter, (req: Request, res: Response) => {
@@ -484,7 +520,7 @@ app.get("/api/events", readLimiter, (req: Request, res: Response) => {
 app.get(
   "/api/streams/export.csv",
   readLimiter,
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const parsedQuery = listStreamsQuerySchema.safeParse(req.query);
     if (!parsedQuery.success) {
       sendValidationError(req, res, parsedQuery.error.issues);
@@ -492,6 +528,22 @@ app.get(
     }
 
     const query = parsedQuery.data;
+    const cacheKey = `streams:export:${JSON.stringify(query)}`;
+    
+    try {
+      const cache = getCache();
+      const cached = await cache.get<string>(cacheKey);
+      if (cached) {
+        res.set("Cache-Control", "max-age=5");
+        res.setHeader("Content-Type", "text/csv");
+        res.setHeader("Content-Disposition", 'attachment; filename="export.csv"');
+        res.send(cached);
+        return;
+      }
+    } catch {
+      // If cache fails, just proceed without caching
+    }
+
     let data = listStreams(query.include_archived).map((stream) => ({
       ...stream,
       progress: calculateProgress(stream),
@@ -529,10 +581,19 @@ app.get(
         return `${stream.id},${stream.sender},${stream.recipient},${stream.assetCode},${stream.totalAmount},${stream.progress.status},${stream.startAt}`;
       })
       .join("\n");
+    const csvContent = header + rows;
 
+    try {
+      const cache = getCache();
+      await cache.set(cacheKey, csvContent, 5);
+    } catch {
+      // If cache fails, just proceed
+    }
+
+    res.set("Cache-Control", "max-age=5");
     res.setHeader("Content-Type", "text/csv");
     res.setHeader("Content-Disposition", 'attachment; filename="export.csv"');
-    res.send(header + rows);
+    res.send(csvContent);
   },
 );
 
@@ -540,7 +601,7 @@ const claimableBatchBodySchema = z.object({
   streamIds: z
     .array(z.string().regex(/^\d+$/, "Stream ID must be numeric"))
     .min(1, "At least one stream ID is required")
-    .max(20, "Maximum 20 stream IDs per batch"),
+    .max(50, "Maximum 50 stream IDs per batch"),
 });
 
 app.post(
@@ -1266,7 +1327,7 @@ app.post(
 app.patch(
   "/api/streams/:id/start-time",
   authMiddleware,
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const parsedId = parseStreamId(req.params.id);
     if (!parsedId.ok) {
       sendValidationError(req, res, parsedId.issues);
