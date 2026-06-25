@@ -1244,6 +1244,51 @@ export async function updateStreamStartAt(id: string,
 
 
 /**
+ * Manually marks a fully-vested stream as completed.
+ * Only callable when vestedAmount >= totalAmount.
+ * Throws 400 if already completed/canceled or not fully vested.
+ */
+export function markStreamComplete(id: string, at: number = nowInSeconds()): StreamRecord {
+  const stream = getStream(id);
+  if (!stream) {
+    const err: any = new Error("Stream not found.");
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const status = computeStatus(stream, at);
+  if (status === "completed") {
+    const err: any = new Error("Stream is already completed.");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (status === "canceled") {
+    const err: any = new Error("Stream is already canceled.");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const progress = calculateProgress(stream, at);
+  if (progress.vestedAmount < stream.totalAmount) {
+    const err: any = new Error("Stream is not fully vested.");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  stream.completedAt = at;
+
+  const db = getDb();
+  db.transaction(() => {
+    upsertStream(stream);
+    recordEventWithDb(db, stream.id, "completed", at, stream.sender);
+  })();
+
+  triggerWebhook("completed", stream);
+
+  return stream;
+}
+
+/**
  * Deletes a stream and all associated events from the database.
  * This is a hard delete and cannot be undone.
  * @param {string} id - Stream ID to delete
