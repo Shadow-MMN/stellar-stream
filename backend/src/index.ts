@@ -1,10 +1,14 @@
 import cors from "cors";
+import helmet from "helmet";
 import { requestLogger } from "./middleware/requestLogger";
 import "dotenv/config";
 import express, { NextFunction, Request, Response } from "express";
 import rateLimit from "express-rate-limit";
 import swaggerUi from "swagger-ui-express";
 import { z } from "zod";
+import { createServer } from "http";
+import { searchStreamsFts } from "./services/db";
+import { initWebSocket } from "./services/websocket";
 import {
   normalizeUnknownApiError,
   sendApiError,
@@ -28,8 +32,11 @@ import {
 } from "./services/indexer";
 import { adminAuth } from "./middleware/adminAuth";
 import { deleteStreamById } from "./services/streamStore";
+import { getStreamStats } from "./services/stats";
 
 import { startReconciliationJob } from "./services/reconciliationJob";
+import { startArchiveJob } from "./services/archiveJob";
+import { startStreamProgressBroadcaster } from "./services/streamProgressBroadcaster";
 import { startWebhookWorker } from "./services/webhookWorker";
 import {
   getDeadLetters,
@@ -239,6 +246,19 @@ const claimableLimiter = rateLimit({
   },
 });
 
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'none'"],
+    },
+  },
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true,
+  },
+}));
+app.use(cors());
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS;
 
 if (ALLOWED_ORIGINS) {
@@ -503,6 +523,36 @@ app.get("/api/streams", readLimiter, async (req: Request, res: Response) => {
 
   res.set("Cache-Control", "max-age=5");
   res.json(result);
+});
+
+app.get("/api/streams/search", readLimiter, (req: Request, res: Response) => {
+  const q = z.string().min(1, "search query must not be empty").safeParse(req.query.q);
+  if (!q.success) {
+    sendValidationError(req, res, q.error.issues);
+    return;
+  }
+
+  try {
+    const streamIds = searchStreamsFts(q.data);
+    const now = nowInSeconds();
+    const results = streamIds
+      .map((id) => getStream(id))
+      .filter((s) => s !== null)
+      .map((s) => ({
+        ...s,
+        progress: calculateProgress(s!, now),
+      }));
+
+    res.set("Cache-Control", "max-age=5");
+    res.json({
+      data: results,
+      total: results.length,
+      query: q.data,
+    });
+  } catch (err) {
+    logger.error({ err }, "search failed");
+    sendApiError(req, res, 500, "Search failed.", { code: "SEARCH_ERROR" });
+  }
 });
 
 app.get("/api/events", readLimiter, (req: Request, res: Response) => {
@@ -1477,19 +1527,18 @@ app.get(
     }
 
     // Parse and validate query parameters
-    const limit = Math.min(
-      Math.max(
-        1,
-        parseInt(req.query.limit as string) || STREAM_HISTORY_DEFAULT_LIMIT,
-      ),
-      STREAM_HISTORY_MAX_LIMIT,
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const pageSize = Math.min(
+      Math.max(1, parseInt(req.query.pageSize as string) || 20),
+      100,
     );
-    const offset = Math.max(0, parseInt(req.query.offset as string) || 0);
 
     const total = countStreamEvents(parsedId.value);
-    const data = getStreamHistory(parsedId.value, limit, offset);
+    const offset = (page - 1) * pageSize;
+    const data = getStreamHistory(parsedId.value, pageSize, offset);
+    const hasMore = offset + pageSize < total;
 
-    res.json({ data, total, limit, offset });
+    res.json({ data, total, page, pageSize, hasMore });
   },
 );
 
@@ -1530,7 +1579,7 @@ app.get(
     }
 
     const progress = calculateProgress(stream);
-    const history = getStreamHistory(parsedId.value);
+    const history = getStreamHistory(parsedId.value, 50, 0, 'asc');
 
     res.json({
       data: {
@@ -1707,8 +1756,14 @@ async function startServer() {
     logger.warn("CONTRACT_ID not set, event indexer will not start");
   }
 
-  app.listen(config.port, () => {
-    logger.info({ port: config.port }, "StellarStream API listening");
+  startArchiveJob(config.archiveCronIntervalMs);
+  startStreamProgressBroadcaster(5000);
+
+  const server = createServer(app);
+  initWebSocket(server);
+
+  server.listen(config.port, () => {
+    logger.info({ port: config.port }, "StellarStream API listening with WebSocket support");
   });
 }
 
@@ -1730,7 +1785,7 @@ app.delete("/api/streams/:id", adminAuth, (req: Request, res: Response) => {
     const deleted = deleteStreamById(parsedId.value);
 
     if (!deleted) {
-      sendApiError(req, res, 404, "Stream not found.", { code: "NOT_FOUND" });
+      sendApiError(req, res, 404, "Stream not found or already archived.", { code: "NOT_FOUND" });
       return;
     }
 

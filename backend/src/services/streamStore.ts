@@ -12,13 +12,16 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import pLimit from "p-limit";
-import { initDb, getDb } from "./db";
+import { initDb, getDb, syncFtsIndex } from "./db";
 import { recordEventWithDb } from "./eventHistory";
 import { streamHasEvent } from "./eventHistory";
 import { triggerWebhook } from "./webhook";
 import { initCache, getCache } from "./cache";
 import { resetStatsCache } from "./stats";
 import { logger } from "../logger";
+import { retryWithBackoff, SorobanSubmitError } from "../utils/sorobanRetry";
+
+export { SorobanSubmitError };
 
 export type StreamStatus = "scheduled" | "active" | "paused" | "completed" | "canceled";
 
@@ -156,6 +159,7 @@ function upsertStream(record: StreamRecord): void {
     pausedDuration: record.pausedDuration ?? 0,
     metadata: record.metadata ? JSON.stringify(record.metadata) : null,
   });
+  syncFtsIndex(record.id, record.sender, record.recipient, record.assetCode);
 }
 
 function listLocalStreamIds(): Set<string> {
@@ -219,34 +223,6 @@ async function invalidateCache(pattern?: string): Promise<void> {
   }
 }
 
-async function retryWithBackoff<T>(
-  fn: () => Promise<T>,
-  maxAttempts = 3,
-): Promise<T> {
-  let lastError: any;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastError = err;
-      const message = String(err).toLowerCase();
-      const isRetryable =
-        message.includes("timeout") ||
-        message.includes("network") ||
-        message.includes("econnrefused") ||
-        message.includes("econnreset");
-
-      if (!isRetryable || attempt === maxAttempts) {
-        throw err;
-      }
-
-      const delayMs = Math.pow(2, attempt - 1) * 1000;
-      logger.info({ err, attempt, delayMs }, "retryable operation failed, retrying");
-      await new Promise((r) => setTimeout(r, delayMs));
-    }
-  }
-  throw lastError;
-}
 
 function getSorobanContext():
   | {
@@ -1268,6 +1244,10 @@ export async function updateStreamStartAt(id: string,
 
 
 /**
+ * Soft-deletes a stream by setting archived_at timestamp.
+ * This preserves the stream record for audit purposes.
+ * @param {string} id - Stream ID to soft-delete
+ * @returns {boolean} True if stream was archived, false if not found or already archived
  * Manually marks a fully-vested stream as completed.
  * Only callable when vestedAmount >= totalAmount.
  * Throws 400 if already completed/canceled or not fully vested.
@@ -1322,17 +1302,15 @@ export function deleteStreamById(id: string): boolean {
   const db = getDb();
 
   const stream = db
-    .prepare("SELECT id FROM streams WHERE id = ?")
-    .get(id);
+    .prepare("SELECT id, archived_at FROM streams WHERE id = ?")
+    .get(id) as { id: string; archived_at: number | null } | undefined;
 
   if (!stream) return false;
 
-  const transaction = db.transaction(() => {
-    db.prepare("DELETE FROM event_history WHERE stream_id = ?").run(id);
-    db.prepare("DELETE FROM streams WHERE id = ?").run(id);
-  });
+  if (stream.archived_at !== null) return false;
 
-  transaction();
+  const now = nowInSeconds();
+  db.prepare("UPDATE streams SET archived_at = ? WHERE id = ?").run(now, id);
 
   return true;
 }
