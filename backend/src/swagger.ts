@@ -1287,6 +1287,73 @@ export const swaggerDocument = {
         },
       },
     },
+    "/api/streams/{id}/reconcile": {
+      post: {
+        summary: "Reconcile stream with on-chain state",
+        description:
+          "Forces an immediate Soroban get_stream call to sync the local SQLite record with the on-chain state. " +
+          "Useful when a transaction (claim, cancel) has been submitted but the indexer hasn't polled yet. " +
+          "Rate limited to 5 calls per stream per minute.",
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            description: "The unique ID of the stream to reconcile.",
+            schema: {
+              type: "string",
+            },
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Stream reconciled successfully.",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    data: {
+                      $ref: "#/components/schemas/Stream",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "404": {
+            description: "Stream not found on-chain.",
+            content: {
+              "application/json": {
+                schema: {
+                  $ref: "#/components/schemas/Error",
+                },
+              },
+            },
+          },
+          "429": {
+            description: "Rate limit exceeded (5 calls per stream per minute).",
+            content: {
+              "application/json": {
+                schema: {
+                  $ref: "#/components/schemas/Error",
+                },
+              },
+            },
+          },
+          "500": {
+            description: "Failed to reconcile stream.",
+            content: {
+              "application/json": {
+                schema: {
+                  $ref: "#/components/schemas/Error",
+                },
+              },
+            },
+          },
+        },
+      },
+    },
     "/api/streams/{id}/mark-complete": {
       post: {
         summary: "Manually complete a stream",
